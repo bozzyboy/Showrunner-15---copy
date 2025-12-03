@@ -9,7 +9,7 @@ export type ProjectFormatType = 'EPISODIC' | 'SINGLE_STORY' | 'NARRATED_VIDEO' |
 
 // --- MODEL GATEWAY TYPES ---
 // Relaxed to allow dynamic providers like 'suno', 'elevenlabs', 'comfyui'
-export type ProviderType = 'google_native' | 'openai_compatible' | string;
+export type ProviderType = string;
 
 export interface APIEndpointDefinition {
   url: string;

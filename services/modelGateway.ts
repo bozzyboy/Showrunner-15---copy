@@ -1,4 +1,3 @@
-
 import { get } from 'lodash-es';
 import { AIModelConfig, APIEndpointDefinition } from '../types';
 import { geminiService } from './geminiService';
@@ -72,7 +71,6 @@ export class ModelGateway {
                 return ModelGateway.LOCAL_FALLBACK_MODELS;
             }
         } catch (error) {
-            // console.warn("Error fetching remote definitions:", error);
             // Silent fallback is preferred for offline-first apps
             return ModelGateway.LOCAL_FALLBACK_MODELS;
         }
@@ -111,34 +109,32 @@ export class ModelGateway {
         inputs: Record<string, any>
     ): Promise<any> {
         const apiKey = localStorage.getItem(`apikey_${config.provider}`);
-        // Allow no key for local providers like 'comfyui' if explicitly set/implied, 
-        // but generally generic providers might need one. 
-        // If apiKey is null, we proceed, as some local services (like local Comfy) might not need it.
+        if (!apiKey && config.provider !== 'google_native') {
+            throw new Error(`Missing API Key for provider: ${config.provider}`);
+        }
 
         const endpoint = config.endpoints?.generate;
         if (!endpoint) throw new Error(`No generation endpoint defined for model ${config.name}`);
 
-        // 1. Prepare Payload Inputs
+        // 1. Prepare Headers (inject API Key)
+        const headers: Record<string, string> = {};
+        if (endpoint.headers) {
+            for (const [key, value] of Object.entries(endpoint.headers)) {
+                headers[key] = value.replace('{{key}}', apiKey || '');
+            }
+        }
+
+        // 2. Prepare Payload
         // We inject the model ID into inputs so it can be mapped if needed
         const requestInputs = { ...inputs, id: config.id };
         const body = this.constructPayload(endpoint.paramMapping, requestInputs);
 
-        // 2. Prepare URL with Templating (e.g. {{id}} injection in URL)
+        // 3. URL Templating (CRITICAL FOR FAL/REPLICATE)
+        // Replaces placeholders like {{id}} inside the URL string itself
         let finalUrl = endpoint.url;
-        finalUrl = finalUrl.replace(/\{\{(\w+)\}\}/g, (_, key) => {
-             if (requestInputs[key] !== undefined) return String(requestInputs[key]);
-             // Special case: inject key into URL if needed (e.g. query param)
-             if (key === 'key' && apiKey) return apiKey;
-             return `{{${key}}}`; 
-        });
-
-        // 3. Prepare Headers (inject API Key)
-        const headers: Record<string, string> = {};
-        if (endpoint.headers) {
-            for (const [key, value] of Object.entries(endpoint.headers)) {
-                // Replace {{key}} in headers
-                headers[key] = value.replace('{{key}}', apiKey || '');
-            }
+        if (finalUrl.includes('{{')) {
+             if (config.id) finalUrl = finalUrl.replace('{{id}}', config.id);
+             // Add any other replacements if needed
         }
 
         // 4. Make Request
@@ -161,8 +157,6 @@ export class ModelGateway {
             return this.pollForCompletion(data, config, apiKey || '');
         } else {
             // Synchronous response
-            // We expect outputMapping to define where the result is. 
-            // e.g. { "text": "choices[0].message.content" } or { "image": "data[0].url" }
             return data;
         }
     }
@@ -174,7 +168,6 @@ export class ModelGateway {
         const statusEndpoint = config.endpoints!.status!;
         
         // Extract Task ID from initial response based on Generate endpoint's output mapping
-        // We assume 'id' in outputMapping points to the task ID
         const taskIdPath = config.endpoints?.generate.outputMapping?.['id'] || 'id';
         const taskId = resolvePath(initialResponse, taskIdPath);
 
@@ -188,6 +181,7 @@ export class ModelGateway {
             }
         }
 
+        // URL Templating for Status Endpoint
         const statusUrl = statusEndpoint.url.replace('{{id}}', taskId);
         
         const POLLING_INTERVAL = 2000; // 2s
@@ -209,12 +203,13 @@ export class ModelGateway {
             const statusPath = statusEndpoint.outputMapping?.['status'] || 'status';
             const statusValue = resolvePath(data, statusPath);
 
-            // Common success flags
-            if (['succeeded', 'completed', 'done', 'success'].includes(statusValue?.toLowerCase())) {
+            // Common success flags (case-insensitive check)
+            const s = String(statusValue).toLowerCase();
+            if (['succeeded', 'completed', 'done', 'success'].includes(s)) {
                 return data;
             }
 
-            if (['failed', 'error'].includes(statusValue?.toLowerCase())) {
+            if (['failed', 'error', 'canceled'].includes(s)) {
                 throw new Error(`Generation failed with status: ${statusValue}`);
             }
         }
@@ -271,19 +266,17 @@ export class ModelGateway {
 
                 // If async polling was used, rawResponse is the final status response.
                 // If sync, it's the generate response.
-                // We use the appropriate outputMapping.
                 
                 const endpointDef = config.endpoints?.status ? config.endpoints.status : config.endpoints?.generate;
-                const resultPath = endpointDef?.outputMapping?.['image'] || 'image_url'; // Default guess
+                const resultPath = endpointDef?.outputMapping?.['image'] || 'image_url'; 
                 
                 const imageUrl = resolvePath(rawResponse, resultPath);
 
                 if (!imageUrl) throw new Error("Could not extract image URL from provider response.");
 
-                // If result is a URL (not base64), we might need to fetch it to convert to base64 for local storage
+                // If result is a URL (not base64), fetch and convert to base64 for local storage
                 if (imageUrl.startsWith('http')) {
-                    // Fetch image through proxy if needed or directly if CORS allows
-                    // Note: For now assuming direct fetch works or user handles CORS
+                    // Fetch image directly (assuming CORS allows or it's a public URL)
                     const imgResp = await fetch(imageUrl);
                     const blob = await imgResp.blob();
                     return new Promise((resolve, reject) => {
